@@ -163,8 +163,9 @@
     <div class="mark">1<b>2</b>1 스케줄</div>
     <div class="sub">BNI 원투원 미팅</div>
   </header>
+  <p id="stat-line" class="hint" style="margin:-10px 0 14px"></p>
   <div id="app"><div class="card"><div class="empty">불러오는 중…</div></div></div>
-  <div class="foot">BNI 챕터 내부용 · 문의는 챕터 운영진에게</div>
+  <div class="foot">만든 사람 · 송승훈 (T.M LINK) · <a id="dica-link" href="#">디지털 명함 보기</a></div>
 </div>
 
 <script type="module">
@@ -181,16 +182,22 @@ const firebaseConfig = {
 };
 const COL = "one21";               // Firestore 컬렉션 이름
 const HOURS = [7,8,9,10,11,12,13,14,15,16,17,18,19,20,21];
+const DICA_URL = "https://jinjjabg-hub.github.io/T.M-LINK/"; // 승훈님 DiCA 명함 링크로 교체
 /* ═══════════════════════════════════════════════════ */
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, collection, getDocs,
-  runTransaction, deleteDoc
+  runTransaction, deleteDoc, onSnapshot, increment
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const db = getFirestore(initializeApp(firebaseConfig));
 const app = document.getElementById("app");
+document.getElementById("dica-link").href = DICA_URL;
+getDoc(doc(db,"stats","one21")).then(s=>{
+  const n = s.exists() ? s.data().count||0 : 0;
+  if(n>0) document.getElementById("stat-line").textContent = `지금까지 이 도구로 ${n}건의 121이 성사됐습니다`;
+}).catch(()=>{});
 const q  = new URLSearchParams(location.search);
 const DOW = ["일","월","화","수","목","금","토"];
 
@@ -257,6 +264,7 @@ function viewCreate(){
     <label class="f"><span>기본 미팅 장소 (선택)</span><input id="f-place" type="text" placeholder="예) 대연동 사무실 / 상대방 사무실 방문"></label>
     <label class="f"><span>남길 말 (선택)</span><textarea id="f-memo" placeholder="예) 예약해 주시면 제가 대표님 계신 곳으로 찾아가겠습니다."></textarea></label>
     <label class="check"><input id="f-zoom" type="checkbox" checked><span>줌(Zoom) 미팅도 가능합니다</span></label>
+    <label class="check" style="margin-top:8px"><input id="f-shownames" type="checkbox"><span>예약된 시간에 상대방 이름까지 공개 (기본은 "예약됨"만 표시)</span></label>
   </div>`);
 
   const c2 = el(`<div class="card">
@@ -335,6 +343,7 @@ function viewCreate(){
         place: c1.querySelector("#f-place").value.trim(),
         memo:  c1.querySelector("#f-memo").value.trim(),
         zoom:  c1.querySelector("#f-zoom").checked,
+        showNames: c1.querySelector("#f-shownames").checked,
         dur, editKey: key,
         slots: [...slots].sort(),
         createdAt: Date.now()
@@ -358,7 +367,7 @@ async function viewBook(slug){
     return;
   }
   const h = snap.data();
-  const taken = await loadTaken(slug);
+  const taken = new Map(); // slotId -> booking data (실시간으로 채워짐)
   let day=null, pick=null;
 
   const head = el(`<div class="card">
@@ -417,10 +426,13 @@ async function viewBook(slug){
     const [d,t]=s.split("T"); return `${d}T${pad(+t.slice(0,2)+n)}:00`;
   }
   function drawChips(){
+    if(!day){ chipBox.innerHTML=""; return; }
     const list = h.slots.filter(s=>s.startsWith(day)).sort();
     chipBox.innerHTML = `<div class="chips">` + list.map(s=>{
       const ok = free(s);
-      return `<button type="button" class="chip${ok?"":" taken"}" data-s="${s}" ${ok?"":"disabled"} aria-pressed="${pick===s}">${s.split("T")[1]}</button>`;
+      const b = taken.get(slotId(s));
+      const shown = ok ? s.split("T")[1] : (h.showNames && b?.guestName ? esc(b.guestName) : "예약됨");
+      return `<button type="button" class="chip${ok?"":" taken"}" data-s="${s}" ${ok?"":"disabled"} aria-pressed="${pick===s}">${shown}</button>`;
     }).join("") + `</div>`;
     chipBox.querySelectorAll(".chip:not([disabled])").forEach(b=>b.onclick=()=>{
       pick=b.dataset.s; drawChips();
@@ -449,12 +461,12 @@ async function viewBook(slug){
           guestName:gName, guestPhone:gPhone, mode, place:gPlace, createdAt: Date.now()
         }));
       });
+      setDoc(doc(db,"stats","one21"), { count: increment(1) }, { merge:true }).catch(()=>{});
       viewDone(h, pick, covered, gName, gPhone, mode, gPlace);
     }catch(ex){
       btn.disabled=false; btn.textContent="이 시간으로 예약하기";
       if(String(ex.message)==="TAKEN"){
         err.innerHTML=`<div class="msg err">방금 다른 분이 먼저 예약했습니다. 다른 시간을 골라 주세요.</div>`;
-        taken.clear(); (await loadTaken(slug)).forEach(v=>taken.add(v));
         pick=null; form.classList.add("hide"); drawChips(); cal.redraw();
       }else{
         err.innerHTML=`<div class="msg err">예약하지 못했습니다. 다시 눌러 주세요.</div>`;
@@ -462,6 +474,14 @@ async function viewBook(slug){
       }
     }
   };
+
+  // 실시간 반영: 다른 사람이 예약하면 새로고침 없이 즉시 화면에 반영됩니다.
+  onSnapshot(collection(db,COL,slug,"bookings"), qs=>{
+    taken.clear();
+    qs.forEach(d=>taken.set(d.id, d.data()));
+    cal.redraw();
+    if(day) drawChips();
+  });
 }
 
 async function loadTaken(slug){
@@ -509,10 +529,7 @@ async function viewManage(slug, key, isNew){
   const shareUrl = `${baseUrl()}?s=${slug}`;
   const manageUrl = `${baseUrl()}?s=${slug}&k=${key}`;
 
-  const bookings=[];
-  (await getDocs(collection(db,COL,slug,"bookings"))).forEach(d=>{ if(d.data().head) bookings.push(d.data()); });
-  bookings.sort((a,b)=>a.slot.localeCompare(b.slot));
-  const takenIds = await loadTaken(slug);
+  let takenIds = await loadTaken(slug);
 
   app.innerHTML="";
   if(isNew) app.append(el(`<div class="card"><div class="msg ok">링크가 만들어졌습니다. 아래 <b>공유용 링크</b>를 챕터 대표님들께 보내세요.</div>
@@ -534,30 +551,42 @@ async function viewManage(slug, key, isNew){
 ${shareUrl}`, e.currentTarget);
   links.querySelector("#cp3").onclick = e=>copy(manageUrl, e.currentTarget);
 
-  const bk = el(`<div class="card">
-    <h2>예약 현황 <span style="color:var(--mute);font-weight:600">${bookings.length}건</span></h2>
+  const bk = el(`<div class="card"><div id="bk-inner"></div></div>`);
+  app.append(bk);
+  const bkInner = bk.querySelector("#bk-inner");
+
+  function renderBookings(bookings){
+    bkInner.innerHTML = `<h2>예약 현황 <span style="color:var(--mute);font-weight:600">${bookings.length}건</span></h2>
     ${bookings.length ? `<ul class="list">${bookings.map(b=>`
       <li><div>
         <div class="who">${esc(b.guestName)} <span class="tag${b.mode==="Zoom"?" zoom":""}">${esc(b.mode)}</span></div>
         <div class="meta">${label(b.slot)} · ${esc(b.place||"-")} · ${esc(b.guestPhone)}</div>
       </div>
       <button class="chip" data-cancel="${slotId(b.slot)}" style="width:auto;padding:6px 10px">취소</button></li>`).join("")}</ul>`
-      : `<div class="empty">아직 예약이 없습니다. 링크를 보내보세요.</div>`}
-  </div>`);
-  app.append(bk);
-  bk.querySelectorAll("[data-cancel]").forEach(b=>b.onclick=async()=>{
-    if(!confirm("이 예약을 취소할까요? 상대방에게는 알림이 가지 않으니 직접 연락해 주세요.")) return;
-    const headId=b.dataset.cancel;
-    const all=[]; (await getDocs(collection(db,COL,slug,"bookings"))).forEach(d=>{
-      if(slotId(d.data().headSlot||d.data().slot)===headId) all.push(d.id);
+      : `<div class="empty">아직 예약이 없습니다. 링크를 보내보세요.</div>`}`;
+    bkInner.querySelectorAll("[data-cancel]").forEach(b=>b.onclick=async()=>{
+      if(!confirm("이 예약을 취소할까요? 상대방에게는 알림이 가지 않으니 직접 연락해 주세요.")) return;
+      const headId=b.dataset.cancel;
+      const all=[]; (await getDocs(collection(db,COL,slug,"bookings"))).forEach(d=>{
+        if(slotId(d.data().headSlot||d.data().slot)===headId) all.push(d.id);
+      });
+      await Promise.all(all.map(id=>deleteDoc(doc(db,COL,slug,"bookings",id))));
     });
-    await Promise.all(all.map(id=>deleteDoc(doc(db,COL,slug,"bookings",id))));
-    location.reload();
+  }
+
+  // 실시간 반영: 예약이 들어오거나 취소되면 새로고침 없이 목록·시간표가 즉시 바뀝니다.
+  let editCal, editDay, drawEditChips;
+  onSnapshot(collection(db,COL,slug,"bookings"), qs=>{
+    const bookings=[]; takenIds = new Set();
+    qs.forEach(d=>{ takenIds.add(d.id); if(d.data().head) bookings.push(d.data()); });
+    bookings.sort((a,b)=>a.slot.localeCompare(b.slot));
+    renderBookings(bookings);
+    if(editCal) editCal.redraw();
+    if(editDay && drawEditChips) drawEditChips();
   });
 
   /* 시간 추가/삭제 */
   const slots = new Set(h.slots);
-  let day=null;
   const edit = el(`<div class="card">
     <h2>가능한 시간 수정</h2>
     <p class="hint">이미 예약된 칸은 지울 수 없습니다.</p>
@@ -568,24 +597,24 @@ ${shareUrl}`, e.currentTarget);
   app.append(edit);
   const chipBox=edit.querySelector("#chips");
   const todayKey=ymd(new Date());
-  const cal = calendar({
+  editCal = calendar({
     mount: edit.querySelector("#cal"),
     isEnabled: k=>k>=todayKey,
     hasMark: k=>[...slots].some(s=>s.startsWith(k)),
-    selected: ()=>day,
-    onPick: k=>{ day=k; draw(); }
+    selected: ()=>editDay,
+    onPick: k=>{ editDay=k; drawEditChips(); }
   });
-  function draw(){
-    if(!day) return;
+  drawEditChips = function(){
+    if(!editDay) return;
     chipBox.innerHTML=`<div class="chips">`+HOURS.map(hh=>{
-      const s=`${day}T${pad(hh)}:00`, locked=takenIds.has(slotId(s));
+      const s=`${editDay}T${pad(hh)}:00`, locked=takenIds.has(slotId(s));
       return `<button type="button" class="chip" data-s="${s}" ${locked?"disabled":""} aria-pressed="${slots.has(s)}">${pad(hh)}:00</button>`;
     }).join("")+`</div>`;
     chipBox.querySelectorAll(".chip:not([disabled])").forEach(b=>b.onclick=()=>{
       const s=b.dataset.s; slots.has(s)?slots.delete(s):slots.add(s);
-      b.setAttribute("aria-pressed",slots.has(s)); cal.redraw();
+      b.setAttribute("aria-pressed",slots.has(s)); editCal.redraw();
     });
-  }
+  };
   edit.querySelector("#save").onclick = async e=>{
     const btn=e.currentTarget; btn.disabled=true; btn.textContent="저장 중…";
     try{
