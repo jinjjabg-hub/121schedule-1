@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 121 스케줄 (챕터 내부용)
+    match /one21/{slug} {
+      allow read: if true;
+
+      // 새 스케줄 만들기 - 필수 항목이 있어야만 허용
+      allow create: if request.resource.data.keys().hasAll(['name','phone','editKey','slots','dur'])
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.slots.size() <= 300;
+
+      // 시간표 수정 - editKey는 바꿀 수 없음
+      allow update: if request.resource.data.editKey == resource.data.editKey
+                    && request.resource.data.slots.size() <= 300;
+
+      allow delete: if false;
+
+      // 예약
+      match /bookings/{slotId} {
+        allow read: if true;
+        allow create: if request.resource.data.keys().hasAll(['slot','guestName','guestPhone'])
+                      && request.resource.data.guestName is string
+                      && request.resource.data.guestName.size() > 0;
+        allow update: if false;   // 예약 내용 변조 방지
+        allow delete: if true;    // 취소 (관리 링크를 아는 사람만 접근 가능)
+      }
+    }
+  }
+}
